@@ -79,6 +79,7 @@ class _HomeScreenState extends State<HomeScreen>
   @override
   Widget build(BuildContext context) {
     final provider = context.watch<WifiProvider>();
+    final theme = Theme.of(context);
 
     return Scaffold(
       appBar: AppBar(
@@ -100,6 +101,32 @@ class _HomeScreenState extends State<HomeScreen>
             const NetworkSearchBar(),
             const SizedBox(height: 4),
             const NetworkFilterChips(),
+            if (provider.isThrottled) ...[
+              Container(
+                margin: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
+                padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 10),
+                decoration: BoxDecoration(
+                  color: Colors.amber.withOpacity(0.1),
+                  borderRadius: BorderRadius.circular(12),
+                  border: Border.all(color: Colors.amber.withOpacity(0.3), width: 1),
+                ),
+                child: Row(
+                  children: [
+                    const Icon(Icons.warning_amber_rounded, color: Colors.amber, size: 20),
+                    const SizedBox(width: 10),
+                    Expanded(
+                      child: Text(
+                        'Scan throttled by system. Displaying cached results. (You can disable "Wi-Fi scan throttling" in Developer Options)',
+                        style: theme.textTheme.bodySmall?.copyWith(
+                          color: Colors.amber[200],
+                          height: 1.3,
+                        ),
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+            ],
             const SizedBox(height: 4),
             Expanded(child: _buildBody(context, provider)),
           ],

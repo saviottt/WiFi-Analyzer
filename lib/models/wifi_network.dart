@@ -72,6 +72,9 @@ class WifiNetwork {
   /// Approximate distance from the access point, in meters.
   double get distanceEstimate => WifiUtils.estimateDistance(rssi, frequency);
 
+  /// Whether the distance estimate is valid (non-negative).
+  bool get hasValidDistance => distanceEstimate >= 0;
+
   /// Unique identity key combining SSID + BSSID, used for history tracking.
   String get key => '$ssid|$bssid';
 

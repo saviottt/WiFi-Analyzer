@@ -105,17 +105,43 @@ class WifiUtils {
   }
 
   /// Estimates distance (in meters) from an access point using the
-  /// free-space log-distance path loss model:
-  ///   distance = 10 ^ ((27.55 - 20*log10(freqMHz) + |RSSI|) / 20)
-  /// This is an approximation only; real-world distance depends heavily
-  /// on obstacles, antenna orientation and transmit power.
+  /// Log-Distance Path Loss Model, which is significantly more accurate
+  /// for indoor environments than the free-space path loss model:
+  ///   d = 10 ^ ((RSSI_1m - RSSI) / (10 * n))
+  /// Where:
+  ///   - RSSI_1m is the signal strength at 1 meter. It varies by frequency:
+  ///     ~ -35 dBm for 2.4 GHz
+  ///     ~ -40 dBm for 5 GHz
+  ///     ~ -45 dBm for 6 GHz
+  ///   - n is the path loss exponent, set to 3.0 for indoor environments.
   static double estimateDistance(int rssi, int frequencyMHz) {
-    if (frequencyMHz <= 0) return -1;
-    final exponent =
-        (27.55 - (20 * _log10(frequencyMHz.toDouble())) + rssi.abs()) / 20.0;
-    final distance = pow(10, exponent).toDouble();
-    return double.parse(distance.toStringAsFixed(2));
-  }
+    if (frequencyMHz <= 0) return -1.0;
+    try {
+      final band = frequencyToBand(frequencyMHz);
+      final double rssi1m;
+      switch (band) {
+        case WifiBand.ghz24:
+          rssi1m = -35.0;
+          break;
+        case WifiBand.ghz5:
+          rssi1m = -40.0;
+          break;
+        case WifiBand.ghz6:
+          rssi1m = -45.0;
+          break;
+        default:
+          rssi1m = -38.0;
+      }
 
-  static double _log10(double x) => log(x) / ln10;
+      // Path loss exponent n = 3.0 represents a typical indoor home/office environment.
+      const double n = 3.0;
+      final exponent = (rssi1m - rssi) / (10.0 * n);
+      final distance = pow(10, exponent).toDouble();
+
+      if (distance.isNaN || distance.isInfinite) return -1.0;
+      return double.parse(distance.toStringAsFixed(2));
+    } catch (_) {
+      return -1.0;
+    }
+  }
 }

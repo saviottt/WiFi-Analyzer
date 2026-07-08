@@ -27,6 +27,9 @@ class WifiService {
     return androidInfo.version.sdkInt >= 33;
   }
 
+  bool _lastScanThrottled = false;
+  bool get lastScanThrottled => _lastScanThrottled;
+
   /// Requests all permissions required for WiFi scanning:
   /// Location (required by Android for SSID visibility) and, on
   /// Android 13+, Nearby WiFi Devices.
@@ -71,57 +74,114 @@ class WifiService {
   /// Triggers a new WiFi scan and returns the normalized results.
   /// Throws a [WifiServiceError] (as an exception) describing failures.
   Future<List<WifiNetwork>> scan() async {
-    final canStart = await WiFiScan.instance.canStartScan();
-    if (canStart == CanStartScan.notSupported) {
-      throw WifiServiceError.scanNotSupported;
-    }
-    if (canStart == CanStartScan.noLocationPermissionRequired ||
-        canStart == CanStartScan.noLocationPermissionDenied ||
-        canStart == CanStartScan.noLocationPermissionUpgradeAccuracy) {
-      throw WifiServiceError.permissionDenied;
-    }
-    if (canStart == CanStartScan.noLocationServiceDisabled) {
-      throw WifiServiceError.wifiDisabled;
-    }
-
-    // Kick off a scan; ignore return value, we read cached results after.
     try {
-      await WiFiScan.instance.startScan();
+      final canStart = await WiFiScan.instance.canStartScan();
+      if (canStart == CanStartScan.notSupported) {
+        throw WifiServiceError.scanNotSupported;
+      }
+      if (canStart == CanStartScan.noLocationPermissionRequired ||
+          canStart == CanStartScan.noLocationPermissionDenied ||
+          canStart == CanStartScan.noLocationPermissionUpgradeAccuracy) {
+        throw WifiServiceError.permissionDenied;
+      }
+      if (canStart == CanStartScan.noLocationServiceDisabled) {
+        throw WifiServiceError.wifiDisabled;
+      }
+    } catch (e) {
+      if (e is WifiServiceError) rethrow;
+      throw WifiServiceError.unknown;
+    }
+
+    // Kick off a scan; check return value to detect system throttling.
+    bool success = false;
+    try {
+      success = await WiFiScan.instance.startScan();
+      _lastScanThrottled = !success;
     } catch (_) {
-      // Some OEMs throttle scans; we still attempt to read cached results.
+      _lastScanThrottled = true;
     }
 
-    final canGet = await WiFiScan.instance.canGetScannedResults();
-    if (canGet == CanGetScannedResults.notSupported) {
-      throw WifiServiceError.scanNotSupported;
-    }
-    if (canGet == CanGetScannedResults.noLocationPermissionRequired ||
-        canGet == CanGetScannedResults.noLocationPermissionDenied ||
-        canGet == CanGetScannedResults.noLocationPermissionUpgradeAccuracy) {
-      throw WifiServiceError.permissionDenied;
-    }
-    if (canGet == CanGetScannedResults.noLocationServiceDisabled) {
-      throw WifiServiceError.wifiDisabled;
+    try {
+      final canGet = await WiFiScan.instance.canGetScannedResults();
+      if (canGet == CanGetScannedResults.notSupported) {
+        throw WifiServiceError.scanNotSupported;
+      }
+      if (canGet == CanGetScannedResults.noLocationPermissionRequired ||
+          canGet == CanGetScannedResults.noLocationPermissionDenied ||
+          canGet == CanGetScannedResults.noLocationPermissionUpgradeAccuracy) {
+        throw WifiServiceError.permissionDenied;
+      }
+      if (canGet == CanGetScannedResults.noLocationServiceDisabled) {
+        throw WifiServiceError.wifiDisabled;
+      }
+    } catch (e) {
+      if (e is WifiServiceError) rethrow;
+      throw WifiServiceError.unknown;
     }
 
-    final results = await WiFiScan.instance.getScannedResults();
-    final connectedBssid = await _getConnectedBssid();
+    try {
+      List<WiFiAccessPoint> results = [];
+      if (success) {
+        final completer = Completer<List<WiFiAccessPoint>>();
+        StreamSubscription<List<WiFiAccessPoint>>? subscription;
+        Timer? timeoutTimer;
 
-    final networks = results
-        .map((ap) => WifiNetwork.fromAccessPoint(
-              ap,
-              isConnected: connectedBssid != null &&
-                  connectedBssid.toLowerCase() == ap.bssid.toLowerCase(),
-            ))
-        .toList();
+        subscription = WiFiScan.instance.onScannedResultsAvailable.listen(
+          (newResults) {
+            if (!completer.isCompleted) {
+              timeoutTimer?.cancel();
+              subscription?.cancel();
+              completer.complete(newResults);
+            }
+          },
+          onError: (err) {
+            if (!completer.isCompleted) {
+              timeoutTimer?.cancel();
+              subscription?.cancel();
+              completer.completeError(err);
+            }
+          },
+        );
 
-    // Sort by strongest signal (highest RSSI, i.e. closest to 0) first.
-    networks.sort((a, b) => b.rssi.compareTo(a.rssi));
-    return networks;
+        // Safety timeout to fallback to cached results in case OS doesn't fire the stream
+        timeoutTimer = Timer(const Duration(seconds: 4), () async {
+          if (!completer.isCompleted) {
+            subscription?.cancel();
+            try {
+              final cachedResults = await WiFiScan.instance.getScannedResults();
+              completer.complete(cachedResults);
+            } catch (e) {
+              completer.complete([]);
+            }
+          }
+        });
+
+        results = await completer.future;
+      } else {
+        // Scan throttled, fallback immediately to cached results
+        results = await WiFiScan.instance.getScannedResults();
+      }
+
+      final connectedBssid = await getConnectedBssid();
+
+      final networks = results
+          .map((ap) => WifiNetwork.fromAccessPoint(
+                ap,
+                isConnected: connectedBssid != null &&
+                    connectedBssid.toLowerCase() == ap.bssid.toLowerCase(),
+              ))
+          .toList();
+
+      // Sort by strongest signal (highest RSSI, i.e. closest to 0) first.
+      networks.sort((a, b) => b.rssi.compareTo(a.rssi));
+      return networks;
+    } catch (_) {
+      throw WifiServiceError.unknown;
+    }
   }
 
   /// Returns the BSSID of the currently connected WiFi network, if any.
-  Future<String?> _getConnectedBssid() async {
+  Future<String?> getConnectedBssid() async {
     try {
       final bssid = await _networkInfo.getWifiBSSID();
       if (bssid == null || bssid.isEmpty || bssid == '02:00:00:00:00:00') {

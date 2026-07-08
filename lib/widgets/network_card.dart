@@ -101,7 +101,9 @@ class NetworkCard extends StatelessWidget {
                         ),
                         _Chip(
                           icon: Icons.social_distance_rounded,
-                          label: '~${network.distanceEstimate.toStringAsFixed(1)} m',
+                          label: network.hasValidDistance
+                              ? '~${network.distanceEstimate.toStringAsFixed(1)} m'
+                              : 'N/A',
                         ),
                       ],
                     ),

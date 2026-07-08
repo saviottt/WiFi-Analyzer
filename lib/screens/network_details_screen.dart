@@ -97,7 +97,9 @@ class NetworkDetailsScreen extends StatelessWidget {
                       ),
                       _DetailRow(
                         label: 'Estimated Distance',
-                        value: '${latestNetwork.distanceEstimate.toStringAsFixed(2)} m',
+                        value: latestNetwork.hasValidDistance
+                            ? '${latestNetwork.distanceEstimate.toStringAsFixed(2)} m'
+                            : 'N/A',
                       ),
                       _DetailRow(
                         label: 'Status',
