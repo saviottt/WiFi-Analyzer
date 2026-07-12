@@ -36,6 +36,15 @@ class StatusView extends StatelessWidget {
           message: 'Please turn on WiFi to scan for nearby networks.',
           actionLabel: 'Retry',
         );
+      case AppErrorState.locationDisabled:
+        return _StatusContent(
+          icon: Icons.location_off_rounded,
+          title: 'Location Services Disabled',
+          message:
+              'WiFi Analyzer needs Location Services (GPS) to be enabled on your device '
+              'to scan for nearby networks.',
+          actionLabel: 'Retry',
+        );
       case AppErrorState.scanNotSupported:
         return _StatusContent(
           icon: Icons.error_outline_rounded,

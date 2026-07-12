@@ -10,7 +10,7 @@ class CsvExporter {
   CsvExporter._();
 
   /// Writes [networks] to a timestamped CSV file inside the app's
-  /// documents directory and returns the resulting [File].
+  /// temporary directory and returns the resulting [File].
   ///
   /// Columns: SSID, BSSID, RSSI, Frequency, Channel, Band, Security, Timestamp
   static Future<File> exportToCsv(List<WifiNetwork> networks) async {
@@ -33,23 +33,10 @@ class CsvExporter {
 
     final csvString = const ListToCsvConverter().convert(rows);
 
-    final directory = await _resolveExportDirectory();
+    final directory = await getTemporaryDirectory();
     final fileName =
         'wifi_scan_${DateFormat('yyyyMMdd_HHmmss').format(DateTime.now())}.csv';
     final file = File('${directory.path}/$fileName');
     return file.writeAsString(csvString);
-  }
-
-  /// Resolves the best available directory to store exported files.
-  /// Falls back to the application documents directory if external
-  /// storage is unavailable (e.g. on iOS or restricted Android setups).
-  static Future<Directory> _resolveExportDirectory() async {
-    try {
-      final extDir = await getExternalStorageDirectory();
-      if (extDir != null) return extDir;
-    } catch (_) {
-      // Fall through to documents directory.
-    }
-    return getApplicationDocumentsDirectory();
   }
 }

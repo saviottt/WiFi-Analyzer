@@ -4,10 +4,13 @@ import 'package:permission_handler/permission_handler.dart';
 import 'package:provider/provider.dart';
 import '../providers/wifi_provider.dart';
 import '../utils/csv_exporter.dart';
+import '../utils/json_exporter.dart';
+import '../utils/file_utils.dart';
 import '../widgets/network_card.dart';
 import '../widgets/search_and_filters.dart';
 import '../widgets/status_view.dart';
 import 'network_details_screen.dart';
+import 'pdf_export_screen.dart';
 
 class HomeScreen extends StatefulWidget {
   const HomeScreen({super.key});
@@ -40,10 +43,14 @@ class _HomeScreenState extends State<HomeScreen>
   }
 
   Future<void> _handleManualRefresh(WifiProvider provider) async {
+    if (provider.isLoading || provider.isRefreshing) return;
     _refreshIconController.repeat();
-    await provider.refresh();
-    _refreshIconController.stop();
-    _refreshIconController.reset();
+    try {
+      await provider.refresh();
+    } finally {
+      _refreshIconController.stop();
+      _refreshIconController.reset();
+    }
   }
 
   Future<void> _handlePrimaryAction(
@@ -63,16 +70,40 @@ class _HomeScreenState extends State<HomeScreen>
   }
 
   Future<void> _exportCsv(BuildContext context, WifiProvider provider) async {
-    final messenger = ScaffoldMessenger.of(context);
     try {
       final file = await CsvExporter.exportToCsv(provider.filteredNetworks);
-      messenger.showSnackBar(
-        SnackBar(content: Text('Exported to ${file.path}')),
-      );
+      if (context.mounted) {
+        await FileUtils.downloadFile(
+          context: context,
+          tempFile: file,
+          shareText: 'WiFi Analyzer Scan CSV',
+        );
+      }
     } catch (e) {
-      messenger.showSnackBar(
-        SnackBar(content: Text('Export failed: $e')),
-      );
+      if (context.mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('Export failed: $e')),
+        );
+      }
+    }
+  }
+
+  Future<void> _exportJson(BuildContext context, WifiProvider provider) async {
+    try {
+      final file = await JsonExporter.exportToJson(provider.filteredNetworks, provider);
+      if (context.mounted) {
+        await FileUtils.downloadFile(
+          context: context,
+          tempFile: file,
+          shareText: 'WiFi Analyzer Scan JSON',
+        );
+      }
+    } catch (e) {
+      if (context.mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('Export failed: $e')),
+        );
+      }
     }
   }
 
@@ -83,17 +114,74 @@ class _HomeScreenState extends State<HomeScreen>
 
     return Scaffold(
       appBar: AppBar(
-        title: const Text('WiFi Analyzer'),
+        title: provider.isSelectionMode
+            ? Text('Selected: ${provider.selectedBssids.length}')
+            : const Text('WiFi Analyzer'),
         centerTitle: false,
-        actions: [
-          IconButton(
-            tooltip: 'Export CSV',
-            icon: const Icon(Icons.ios_share_rounded),
-            onPressed: provider.filteredNetworks.isEmpty
-                ? null
-                : () => _exportCsv(context, provider),
-          ),
-        ],
+        leading: provider.isSelectionMode
+            ? IconButton(
+                icon: const Icon(Icons.close),
+                onPressed: () => provider.setSelectionMode(false),
+              )
+            : null,
+        actions: provider.isSelectionMode
+            ? [
+                IconButton(
+                  tooltip: 'Select All',
+                  icon: const Icon(Icons.select_all_rounded),
+                  onPressed: () => provider.selectAll(),
+                ),
+                IconButton(
+                  tooltip: 'Clear Selection',
+                  icon: const Icon(Icons.deselect_rounded),
+                  onPressed: provider.selectedBssids.isEmpty
+                      ? null
+                      : () => provider.clearSelection(),
+                ),
+              ]
+            : [
+                IconButton(
+                  tooltip: 'Select Multiple',
+                  icon: const Icon(Icons.playlist_add_check_rounded),
+                  onPressed: provider.filteredNetworks.isEmpty
+                      ? null
+                      : () => provider.setSelectionMode(true),
+                ),
+                PopupMenuButton<String>(
+                  tooltip: 'Download Scan Results',
+                  icon: const Icon(Icons.ios_share_rounded),
+                  enabled: provider.filteredNetworks.isNotEmpty,
+                  onSelected: (value) {
+                    if (value == 'csv') {
+                      _exportCsv(context, provider);
+                    } else if (value == 'json') {
+                      _exportJson(context, provider);
+                    }
+                  },
+                  itemBuilder: (context) => [
+                    const PopupMenuItem(
+                      value: 'csv',
+                      child: Row(
+                        children: [
+                          Icon(Icons.table_rows_rounded),
+                          SizedBox(width: 8),
+                          Text('Download CSV'),
+                        ],
+                      ),
+                    ),
+                    const PopupMenuItem(
+                      value: 'json',
+                      child: Row(
+                        children: [
+                          Icon(Icons.code_rounded),
+                          SizedBox(width: 8),
+                          Text('Download JSON'),
+                        ],
+                      ),
+                    ),
+                  ],
+                ),
+              ],
       ),
       body: SafeArea(
         child: Column(
@@ -132,13 +220,36 @@ class _HomeScreenState extends State<HomeScreen>
           ],
         ),
       ),
-      floatingActionButton: FloatingActionButton(
-        onPressed: () => _handleManualRefresh(provider),
-        child: RotationTransition(
-          turns: _refreshIconController,
-          child: const Icon(Icons.refresh_rounded),
-        ),
-      ),
+      floatingActionButton: provider.isSelectionMode
+          ? FloatingActionButton.extended(
+              onPressed: provider.selectedBssids.isEmpty
+                  ? null
+                  : () {
+                      final selectedNetworks = provider.allNetworks
+                          .where((n) => provider.selectedBssids.contains(n.bssid))
+                          .toList();
+                      Navigator.of(context).push(
+                        MaterialPageRoute(
+                          builder: (_) => PdfExportScreen(selectedNetworks: selectedNetworks),
+                        ),
+                      );
+                    },
+              backgroundColor: provider.selectedBssids.isEmpty
+                  ? theme.colorScheme.surfaceContainerHighest
+                  : theme.colorScheme.primary,
+              foregroundColor: provider.selectedBssids.isEmpty
+                  ? theme.colorScheme.onSurfaceVariant.withOpacity(0.38)
+                  : theme.colorScheme.onPrimary,
+              icon: const Icon(Icons.picture_as_pdf_rounded),
+              label: const Text('Export PDF'),
+            )
+          : FloatingActionButton(
+              onPressed: () => _handleManualRefresh(provider),
+              child: RotationTransition(
+                turns: _refreshIconController,
+                child: const Icon(Icons.refresh_rounded),
+              ),
+            ),
     );
   }
 

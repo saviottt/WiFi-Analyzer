@@ -1,5 +1,7 @@
 import 'package:flutter/material.dart';
+import 'package:provider/provider.dart';
 import '../models/wifi_network.dart';
+import '../providers/wifi_provider.dart';
 import 'signal_indicator.dart';
 
 /// A Material 3 card summarizing a single scanned network. Tapping the
@@ -23,25 +25,48 @@ class NetworkCard extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
+    final provider = context.watch<WifiProvider>();
+    final isSelected = provider.selectedBssids.contains(network.bssid);
     final color = signalQualityColor(network.signalQuality);
+
+    BorderSide borderSide = BorderSide.none;
+    if (provider.isSelectionMode && isSelected) {
+      borderSide = BorderSide(color: theme.colorScheme.primary, width: 2.0);
+    } else if (network.isConnected) {
+      borderSide = BorderSide(color: theme.colorScheme.primary, width: 1.5);
+    }
 
     return Card(
       elevation: 0,
       color: theme.colorScheme.surfaceContainerHigh,
       shape: RoundedRectangleBorder(
         borderRadius: BorderRadius.circular(20),
-        side: network.isConnected
-            ? BorderSide(color: theme.colorScheme.primary, width: 1.5)
-            : BorderSide.none,
+        side: borderSide,
       ),
       margin: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
       child: InkWell(
         borderRadius: BorderRadius.circular(20),
-        onTap: onTap,
+        onTap: provider.isSelectionMode
+            ? () => provider.toggleSelection(network.bssid)
+            : onTap,
+        onLongPress: () {
+          if (!provider.isSelectionMode) {
+            provider.setSelectionMode(true);
+            provider.toggleSelection(network.bssid);
+          }
+        },
         child: Padding(
           padding: const EdgeInsets.all(14),
           child: Row(
             children: [
+              if (provider.isSelectionMode) ...[
+                Checkbox(
+                  value: isSelected,
+                  onChanged: (_) => provider.toggleSelection(network.bssid),
+                  activeColor: theme.colorScheme.primary,
+                ),
+                const SizedBox(width: 8),
+              ],
               Hero(
                 tag: 'signal_${network.bssid}',
                 child: SignalIndicator(rssi: network.rssi),

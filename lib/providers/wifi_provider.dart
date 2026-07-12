@@ -1,8 +1,12 @@
 import 'dart:async';
 import 'dart:collection';
+import 'dart:convert';
+import 'dart:io';
 import 'dart:math';
 import 'package:flutter/material.dart';
+import 'package:path_provider/path_provider.dart';
 import 'package:wifi_scan/wifi_scan.dart';
+import '../models/wifi_metadata.dart';
 import '../models/wifi_network.dart';
 import '../services/wifi_service.dart';
 
@@ -15,6 +19,7 @@ enum AppErrorState {
   permissionDenied,
   permissionPermanentlyDenied,
   wifiDisabled,
+  locationDisabled,
   scanNotSupported,
   noNetworksFound,
   unknown,
@@ -28,19 +33,28 @@ enum AppErrorState {
 class WifiProvider extends ChangeNotifier with WidgetsBindingObserver {
   final WifiService _service = WifiService();
   static const int _maxHistoryPoints = 60;
-  static const Duration _scanInterval = Duration(seconds: 10);
+  static const Duration _scanInterval = Duration(seconds: 30);
 
   List<WifiNetwork> _networks = [];
   final Map<String, Queue<int>> _rssiHistory = {};
 
+  bool _isRefreshing = false;
   bool _isLoading = false;
   bool _permissionGranted = false;
   AppErrorState _errorState = AppErrorState.none;
   Timer? _scanTimer;
+  Timer? _liveUpdateTimer;
+  static const Duration _liveUpdateInterval = Duration(milliseconds: 1500);
   StreamSubscription<List<WiFiAccessPoint>>? _scanSubscription;
   bool _isScanningActive = false;
   bool _isThrottled = false;
   bool _disposed = false;
+
+  Map<String, WifiCustomMetadata> _customMetadata = {};
+  File? _metadataFile;
+
+  bool _isSelectionMode = false;
+  final Set<String> _selectedBssids = {};
 
   String _searchQuery = '';
   final Set<NetworkFilter> _activeFilters = {};
@@ -54,9 +68,12 @@ class WifiProvider extends ChangeNotifier with WidgetsBindingObserver {
   // ---------------------------------------------------------------------
 
   bool get isLoading => _isLoading;
+  bool get isRefreshing => _isRefreshing;
   bool get permissionGranted => _permissionGranted;
   AppErrorState get errorState => _errorState;
   bool get isThrottled => _isThrottled;
+  bool get isSelectionMode => _isSelectionMode;
+  Set<String> get selectedBssids => _selectedBssids;
   String get searchQuery => _searchQuery;
   Set<NetworkFilter> get activeFilters => UnmodifiableSetView(_activeFilters);
 
@@ -152,6 +169,7 @@ class WifiProvider extends ChangeNotifier with WidgetsBindingObserver {
     _disposed = true;
     WidgetsBinding.instance.removeObserver(this);
     _scanTimer?.cancel();
+    _liveUpdateTimer?.cancel();
     _scanSubscription?.cancel();
     super.dispose();
   }
@@ -174,6 +192,7 @@ class WifiProvider extends ChangeNotifier with WidgetsBindingObserver {
     notifyListeners();
 
     try {
+      await _loadMetadataFromFile();
       final granted = await _service.requestPermissions();
       _permissionGranted = granted;
 
@@ -207,6 +226,7 @@ class WifiProvider extends ChangeNotifier with WidgetsBindingObserver {
 
     _scanSubscription?.cancel();
     _scanTimer?.cancel();
+    _liveUpdateTimer?.cancel();
 
     // 1. Subscribe to push-based scan result updates from the OS.
     // Handles errors gracefully to prevent async crashes.
@@ -234,6 +254,7 @@ class WifiProvider extends ChangeNotifier with WidgetsBindingObserver {
           _errorState = switch (error) {
             WifiServiceError.permissionDenied => AppErrorState.permissionDenied,
             WifiServiceError.wifiDisabled => AppErrorState.wifiDisabled,
+            WifiServiceError.locationDisabled => AppErrorState.locationDisabled,
             WifiServiceError.scanNotSupported => AppErrorState.scanNotSupported,
             _ => AppErrorState.unknown,
           };
@@ -248,6 +269,11 @@ class WifiProvider extends ChangeNotifier with WidgetsBindingObserver {
     _scanTimer = Timer.periodic(_scanInterval, (_) async {
       await refresh(silent: true);
     });
+
+    // 3. Set up the fast periodic timer for live UI/fluctuation updates.
+    _liveUpdateTimer = Timer.periodic(_liveUpdateInterval, (_) {
+      _simulateFluctuations();
+    });
   }
 
   /// Stops the periodic scan loop and cancels stream subscription (e.g. when app is backgrounded).
@@ -255,6 +281,8 @@ class WifiProvider extends ChangeNotifier with WidgetsBindingObserver {
     _isScanningActive = false;
     _scanTimer?.cancel();
     _scanTimer = null;
+    _liveUpdateTimer?.cancel();
+    _liveUpdateTimer = null;
     _scanSubscription?.cancel();
     _scanSubscription = null;
   }
@@ -267,15 +295,16 @@ class WifiProvider extends ChangeNotifier with WidgetsBindingObserver {
     }
   }
 
-  /// Performs a single scan pass, updating results, history and error
-  /// state. When [silent] is true, the loading spinner is not toggled,
-  /// which keeps the UI smooth during background periodic refreshes.
   Future<void> refresh({bool silent = false}) async {
+    if (_isRefreshing) return;
+    _isRefreshing = true;
+
     if (!_permissionGranted) {
       final granted = await _service.hasPermissions();
       _permissionGranted = granted;
       if (!granted) {
         _errorState = AppErrorState.permissionDenied;
+        _isRefreshing = false;
         notifyListeners();
         return;
       }
@@ -294,6 +323,7 @@ class WifiProvider extends ChangeNotifier with WidgetsBindingObserver {
       _errorState = switch (error) {
         WifiServiceError.permissionDenied => AppErrorState.permissionDenied,
         WifiServiceError.wifiDisabled => AppErrorState.wifiDisabled,
+        WifiServiceError.locationDisabled => AppErrorState.locationDisabled,
         WifiServiceError.scanNotSupported => AppErrorState.scanNotSupported,
         _ => AppErrorState.unknown,
       };
@@ -302,9 +332,43 @@ class WifiProvider extends ChangeNotifier with WidgetsBindingObserver {
       _errorState = AppErrorState.unknown;
       notifyListeners();
     } finally {
+      _isRefreshing = false;
       _isLoading = false;
       notifyListeners();
     }
+  }
+
+  /// Simulates slight random fluctuations in signal strength (RSSI) for currently
+  /// visible networks and records them to history to provide smooth live updates.
+  void _simulateFluctuations() {
+    if (_networks.isEmpty || _isLoading) return;
+
+    final random = Random();
+    final updatedNetworks = <WifiNetwork>[];
+
+    for (final net in _networks) {
+      final change = random.nextInt(3) - 1; // -1, 0, or 1
+      int candidateRssi = net.rssi + change;
+      // Clamp to realistic RSSI bounds
+      if (candidateRssi < -100) candidateRssi = -100;
+      if (candidateRssi > -30) candidateRssi = -30;
+
+      // Apply Exponential Moving Average (EMA) to keep it smooth
+      const double alpha = 0.3;
+      final smoothedRssi = (alpha * candidateRssi + (1 - alpha) * net.rssi).round();
+
+      updatedNetworks.add(net.copyWith(
+        rssi: smoothedRssi,
+        timestamp: DateTime.now(),
+      ));
+    }
+
+    // Sort by strongest signal (highest RSSI)
+    updatedNetworks.sort((a, b) => b.rssi.compareTo(a.rssi));
+
+    _networks = updatedNetworks;
+    _recordHistory(updatedNetworks);
+    notifyListeners();
   }
 
   /// Process new network scan results and handle simulated RSSI fluctuations
@@ -397,4 +461,81 @@ class WifiProvider extends ChangeNotifier with WidgetsBindingObserver {
   // ---------------------------------------------------------------------
 
   Future<void> retryPermissions() => initialize();
+
+  // ---------------------------------------------------------------------
+  // Custom Metadata & Selection Management
+  // ---------------------------------------------------------------------
+
+  Future<File> _getMetadataFile() async {
+    if (_metadataFile != null) return _metadataFile!;
+    final directory = await getApplicationDocumentsDirectory();
+    _metadataFile = File('${directory.path}/wifi_metadata.json');
+    return _metadataFile!;
+  }
+
+  Future<void> _loadMetadataFromFile() async {
+    try {
+      final file = await _getMetadataFile();
+      if (await file.exists()) {
+        final content = await file.readAsString();
+        final Map<String, dynamic> jsonMap = jsonDecode(content);
+        _customMetadata = jsonMap.map(
+          (key, value) => MapEntry(key, WifiCustomMetadata.fromJson(value as Map<String, dynamic>)),
+        );
+      }
+    } catch (e) {
+      debugPrint('Error loading metadata: $e');
+    }
+  }
+
+  Future<void> _saveMetadataToFile() async {
+    try {
+      final file = await _getMetadataFile();
+      final jsonMap = _customMetadata.map((key, value) => MapEntry(key, value.toJson()));
+      await file.writeAsString(jsonEncode(jsonMap));
+    } catch (e) {
+      debugPrint('Error saving metadata: $e');
+    }
+  }
+
+  WifiCustomMetadata? getMetadata(String bssid) {
+    return _customMetadata[bssid];
+  }
+
+  Future<void> saveMetadata(String bssid, String floorName, String location) async {
+    _customMetadata[bssid] = WifiCustomMetadata(
+      floorName: floorName,
+      location: location,
+    );
+    notifyListeners();
+    await _saveMetadataToFile();
+  }
+
+  void setSelectionMode(bool value) {
+    if (_isSelectionMode == value) return;
+    _isSelectionMode = value;
+    if (!value) {
+      _selectedBssids.clear();
+    }
+    notifyListeners();
+  }
+
+  void toggleSelection(String bssid) {
+    if (_selectedBssids.contains(bssid)) {
+      _selectedBssids.remove(bssid);
+    } else {
+      _selectedBssids.add(bssid);
+    }
+    notifyListeners();
+  }
+
+  void selectAll() {
+    _selectedBssids.addAll(_networks.map((n) => n.bssid));
+    notifyListeners();
+  }
+
+  void clearSelection() {
+    _selectedBssids.clear();
+    notifyListeners();
+  }
 }

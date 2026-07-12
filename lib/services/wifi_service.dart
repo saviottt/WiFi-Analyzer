@@ -11,6 +11,7 @@ enum WifiServiceError {
   none,
   permissionDenied,
   wifiDisabled,
+  locationDisabled,
   scanNotSupported,
   unknown,
 }
@@ -68,14 +69,21 @@ class WifiService {
   /// should direct the user to system settings.
   Future<bool> isPermanentlyDenied() async {
     final location = await Permission.locationWhenInUse.status;
-    return location.isPermanentlyDenied;
+    if (location.isPermanentlyDenied) return true;
+
+    if (await _needsNearbyWifiDevicesPermission()) {
+      final nearby = await Permission.nearbyWifiDevices.status;
+      return nearby.isPermanentlyDenied;
+    }
+
+    return false;
   }
 
   /// Triggers a new WiFi scan and returns the normalized results.
   /// Throws a [WifiServiceError] (as an exception) describing failures.
   Future<List<WifiNetwork>> scan() async {
     try {
-      final canStart = await WiFiScan.instance.canStartScan();
+      final canStart = await WiFiScan.instance.canStartScan(askPermissions: false);
       if (canStart == CanStartScan.notSupported) {
         throw WifiServiceError.scanNotSupported;
       }
@@ -85,7 +93,7 @@ class WifiService {
         throw WifiServiceError.permissionDenied;
       }
       if (canStart == CanStartScan.noLocationServiceDisabled) {
-        throw WifiServiceError.wifiDisabled;
+        throw WifiServiceError.locationDisabled;
       }
     } catch (e) {
       if (e is WifiServiceError) rethrow;
@@ -102,7 +110,7 @@ class WifiService {
     }
 
     try {
-      final canGet = await WiFiScan.instance.canGetScannedResults();
+      final canGet = await WiFiScan.instance.canGetScannedResults(askPermissions: false);
       if (canGet == CanGetScannedResults.notSupported) {
         throw WifiServiceError.scanNotSupported;
       }
@@ -112,7 +120,7 @@ class WifiService {
         throw WifiServiceError.permissionDenied;
       }
       if (canGet == CanGetScannedResults.noLocationServiceDisabled) {
-        throw WifiServiceError.wifiDisabled;
+        throw WifiServiceError.locationDisabled;
       }
     } catch (e) {
       if (e is WifiServiceError) rethrow;
